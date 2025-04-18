@@ -96,7 +96,10 @@ class Carbon:
 
         # Update cache_data
         with cache_filepath.open('wb') as cache_file:
-            cache_data[key] = value
+            cache_data[key] = {
+                'time': time(),
+                'value': value,
+            }
 
             # Update cache file
             pickle.dump(cache_data, cache_file)
@@ -106,14 +109,15 @@ class Carbon:
 
         return value
 
-    def cache_get(self, key, default_value=None):
+    def cache_get(self, key, default_value=None, max_age=None):
         """
         Get cached value
 
         key: Key of stored value
         default_value: Value to return if stored value cannot be found, or cache has expired (Default: None)
+        max_age: Maximum age in seconds
 
-        Returns stored value or default value        
+        Returns stored value or default value
         """
         value = None
         cache_filepath = Path(self.config['cache_location'], 'aussiebb_carbon.cache')
@@ -124,10 +128,16 @@ class Carbon:
             with cache_filepath.open('rb') as cache_file:
                 cache_data = pickle.load(cache_file)
 
-                if key in cache_data and 'login_expiry' in cache_data and time() < cache_data['login_expiry']:
-                    if self.debug is True:
-                        print(f'Cache hit: {key}')
-                    value = cache_data[key]
+                if key in cache_data and 'login_expiry' in cache_data and time() < cache_data['login_expiry']['value']:
+                    # Check age of stored data does not exceed max_age
+                    if max_age is None or cache_data[key]['time'] + max_age > time():
+                        if self.debug is True:
+                            print(f'Cache hit: {key}')
+                        value = cache_data[key]['value']
+                    else:
+                        if self.debug is True:
+                            print(f'Cache expired: {key}')
+                        value = default_value
 
         if value is None:
             if self.debug is True:
@@ -254,7 +264,7 @@ class Carbon:
 
         return customer
 
-    def get_all_services(self, use_cache=True):
+    def get_all_services(self, use_cache=True, cache_max_age=300):
         """
         Get all customer services from API.
 
@@ -262,7 +272,7 @@ class Carbon:
 
         Returns list of all services as a DataFrame
         """
-        services = self.cache_get('services', None)
+        services = self.cache_get('services', None, max_age=cache_max_age)
 
         if services is None or use_cache is False:
             self.do_login()
