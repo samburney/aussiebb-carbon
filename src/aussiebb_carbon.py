@@ -1,7 +1,10 @@
 import requests
-import datetime
+from time import time
 import pandas as pd
 import netaddr
+import pickle
+
+from pathlib import Path
 
 
 class Carbon:
@@ -11,7 +14,10 @@ class Carbon:
             api_username=None,
             api_password=None,
             api_test_url=None,
-            api_mode='prod'):
+            api_mode='prod',
+            cache_type='file',
+            cache_location=None,
+            debug=False):
 
         # Config
         self.config = {}
@@ -31,18 +37,104 @@ class Carbon:
         self.config['username'] = api_username
         self.config['password'] = api_password
 
-        # Session data
-        self.session = None
-        self.login_response = None
-        self.login_expiry = 0
-        self.access_token = None
+        # Cache to limit slow lookups
+        if cache_type == 'file':
+            self.config['cache_type'] = cache_type
+        else:
+            raise NotImplementedError("Only the 'file' cache type is implemented")
 
-        # API cached data
-        self.customer = None
-        self.services = None
+        if cache_location is not None:
+            self.config['cache_location'] = Path(cache_location).resolve()
+        else:
+            script_location = Path(__file__).resolve().parent
+            self.config['cache_location'] = script_location
+
+        self.debug = debug
+
+        # API session data
+        self.login_response = self.cache_get('login_response', None)
+        self.login_expiry = self.cache_get('login_expiry', 0)
 
         # Set up persistent session
-        self.session = requests.Session()
+        self.session = self.get_session()
+
+    def get_session(self, use_cache=True):
+        """
+        Start a cached requests.Session
+
+        use_cache: Use cached session as Boolean
+
+        Returns requests.Session() object
+        """
+        session_data = self.cache_get('session_data')
+
+        if use_cache is True and session_data is not None:
+            return session_data
+
+        session_data = requests.Session()
+        self.cache_store('session_data', session_data)
+
+        return session_data
+
+    def cache_store(self, key, value):
+        """
+        Store value in cache
+
+        key: Key of stored value
+        value: Value to be stored
+
+        Returns value
+        """
+        cache_filepath = Path(self.config['cache_location'], 'aussiebb_carbon.cache')
+
+        # If cache file already exists, get existing cached data
+        if cache_filepath.is_file() and cache_filepath.stat().st_size > 0:
+            with cache_filepath.open('rb') as cache_file:
+                cache_data = pickle.load(cache_file)
+        else:
+            cache_data = {}
+
+        # Update cache_data
+        with cache_filepath.open('wb') as cache_file:
+            cache_data[key] = value
+
+            # Update cache file
+            pickle.dump(cache_data, cache_file)
+
+            if self.debug is True:
+                print(f'Cache stored: {key}')
+
+        return value
+
+    def cache_get(self, key, default_value=None):
+        """
+        Get cached value
+
+        key: Key of stored value
+        default_value: Value to return if stored value cannot be found, or cache has expired (Default: None)
+
+        Returns stored value or default value        
+        """
+        value = None
+        cache_filepath = Path(self.config['cache_location'], 'aussiebb_carbon.cache')
+        cache_data = {}
+
+        # If cache file already exists, get existing cached data
+        if cache_filepath.is_file() and cache_filepath.stat().st_size > 0:
+            with cache_filepath.open('rb') as cache_file:
+                cache_data = pickle.load(cache_file)
+
+                if key in cache_data and 'login_expiry' in cache_data and time() < cache_data['login_expiry']:
+                    if self.debug is True:
+                        print(f'Cache hit: {key}')
+                    value = cache_data[key]
+
+        if value is None:
+            if self.debug is True:
+                print(f'Cache miss: {key}')
+            value = default_value
+
+        return value
 
     def make_endpoint_url(self, endpoint):
         """
@@ -82,7 +174,7 @@ class Carbon:
 
         Returns requests.response object
         """
-        timestamp_now = datetime.datetime.timestamp(datetime.datetime.now())
+        timestamp_now = time()
 
         if self.login_response is None and timestamp_now > self.login_expiry:
             url = self.make_endpoint_url('login')
@@ -98,8 +190,9 @@ class Carbon:
             response = self.session.post(url=url, json=request_data, headers=headers)
 
             if response.status_code == 200:
-                self.login_response = response
-                self.login_expiry = timestamp_now + self.login_response.json()['expiresIn']
+                self.login_response = self.cache_store('login_response', response)
+                self.login_expiry = self.cache_store('login_expiry', timestamp_now + self.login_response.json()['expiresIn'])
+                self.cache_store('session_data', self.session)
             else:
                 raise ConnectionError(f'A login error occured. (HTTP Response Code: {response.status_code}; Reason: {response.reason})')
 
@@ -123,7 +216,6 @@ class Carbon:
 
         self.login_response = None
         self.login_expiry = 0
-        self.access_token = None
 
         return response
 
@@ -142,7 +234,9 @@ class Carbon:
 
         Returns customer as a dict
         """
-        if self.customer is None or use_cache is False:
+        customer = self.cache_get('customer', None)
+
+        if customer is None or use_cache is False:
             self.do_login()
 
             url = self.make_endpoint_url('customer')
@@ -154,11 +248,11 @@ class Carbon:
             response = self.session.get(url=url, headers=headers, params=params)
 
             if response.status_code == 200:
-                self.customer = response.json()
+                customer = self.cache_store('customer', response.json())
             else:
                 raise ConnectionError(f'An error occured making an API request. (HTTP Response Code: {response.status_code}; Reason: {response.reason})')
 
-        return self.customer
+        return customer
 
     def get_all_services(self, use_cache=True):
         """
@@ -168,7 +262,9 @@ class Carbon:
 
         Returns list of all services as a DataFrame
         """
-        if self.services is None or use_cache is False:
+        services = self.cache_get('services', None)
+
+        if services is None or use_cache is False:
             self.do_login()
 
             url = self.make_endpoint_url('carbon/services')
@@ -190,11 +286,11 @@ class Carbon:
                 services_headend = services['network_headend'].apply(pd.Series).add_prefix('headend_')
                 services = services.assign(**services_headend).drop(['network_headend'], axis=1)
 
-                self.services = services
+                self.cache_store('services', services)
             else:
                 raise ConnectionError(f'An error occured making an API request. (HTTP Response Code: {response.status_code}; Reason: {response.reason})')
 
-        return self.services
+        return services
 
     def get_service(self, service_id, use_cache=True):
         """
@@ -205,7 +301,7 @@ class Carbon:
 
         Returns service detail as a dict
         """
-        services = self.get_all_services()
+        services = self.get_all_services(use_cache)
         return services.loc[(services.id == service_id)].to_dict(orient='records')[0]
 
     def get_service_by_avc(self, avc_id, use_cache=True):
@@ -217,7 +313,7 @@ class Carbon:
 
         Returns service detail as a dict
         """
-        services = self.get_all_services()
+        services = self.get_all_services(use_cache)
         return services.loc[(services.service_identifier.str.upper() == avc_id.upper())].to_dict(orient='records')[0]
 
     def get_service_by_loc_id(self, loc_id, use_cache=True):
@@ -229,7 +325,7 @@ class Carbon:
 
         Returns service detail as a dict
         """
-        services = self.get_all_services()
+        services = self.get_all_services(use_cache)
         return services.loc[(services.location_id.str.upper() == loc_id.upper())].to_dict(orient='records')[0]
 
     def get_service_ip_addresses(self, service_id, use_cache=True):
@@ -242,7 +338,7 @@ class Carbon:
         Returns assigned IP addresses as a list of dicts
         """
         service_ip_addresses = []
-        services = self.get_all_services()
+        services = self.get_all_services(use_cache)
 
         network_ips = services.loc[(services.id == service_id)].reset_index()['network_ips'][0]
 
