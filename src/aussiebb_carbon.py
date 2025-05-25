@@ -264,11 +264,27 @@ class Carbon:
 
         return customer
 
+    def _process_services(self, services):
+        # Expand data in some columns
+        services = pd.DataFrame(services)
+
+        # network column
+        services_network = services['network'].apply(pd.Series).add_prefix('network_')
+        services = services.assign(**services_network).drop(['network'], axis=1)
+
+        # network_headend column
+        if 'network_headend' in services.columns:
+            services_headend = services['network_headend'].apply(pd.Series).add_prefix('headend_')
+            services = services.assign(**services_headend).drop(['network_headend'], axis=1)
+
+        return services
+
     def get_all_services(self, use_cache=True, cache_max_age=300):
         """
         Get all customer services from API.
 
         use_cache: Use pre-fetched data if available (Default: True)
+        cache_max_age: Maximum age of cached data in seconds (Default: 300)
 
         Returns list of all services as a DataFrame
         """
@@ -285,20 +301,74 @@ class Carbon:
             response = self.session.get(url=url, headers=headers)
 
             if response.status_code == 200:
-                # Expand data in some columns
-                services = pd.DataFrame(response.json()['data'])
-
-                # network column
-                services_network = services['network'].apply(pd.Series).add_prefix('network_')
-                services = services.assign(**services_network).drop(['network'], axis=1)
-
-                # network_headend column
-                services_headend = services['network_headend'].apply(pd.Series).add_prefix('headend_')
-                services = services.assign(**services_headend).drop(['network_headend'], axis=1)
+                services = self._process_services(response.json()['data'])
 
                 self.cache_store('services', services)
             else:
                 raise ConnectionError(f'An error occured making an API request. (HTTP Response Code: {response.status_code}; Reason: {response.reason})')
+
+        return services
+
+    def get_services_by_tag(self, tag, use_cache=True, cache_max_age=300):
+        """
+        Get all customer services from API matching provided list of tags.
+
+        tag: Single tag to match
+        use_cache: Use pre-fetched data if available (Default: True)
+        cache_max_age: Maximum age of cached data in seconds (Default: 300)
+
+        Returns list of all services as a DataFrame
+        """
+        cache_name = f'services_tag_{tag}'
+        services = self.cache_get(cache_name, None, max_age=cache_max_age)
+
+        if services is None or use_cache is False:
+            self.do_login()
+
+            url = self.make_endpoint_url('carbon/services')
+            headers = {
+                "Accept": "application/json"
+            }
+            params = {
+                'filter[tags]': tag
+            }
+
+            response = self.session.get(url=url, headers=headers, params=params)
+
+            if response.status_code == 200:
+                services_data = response.json()['data']
+                if len(services_data) > 0:
+                    services = self._process_services(services_data)
+                    self.cache_store(cache_name, services)
+            else:
+                raise ConnectionError(f'An error occured making an API request. (HTTP Response Code: {response.status_code}; Reason: {response.reason})')
+
+        return services
+
+    def get_services_by_tags(self, tags, use_cache=True, cache_max_age=300):
+        """
+        Get all customer services from API matching provided list of tags.
+
+        tag: List of tags to match
+        use_cache: Use pre-fetched data if available (Default: True)
+        cache_max_age: Maximum age of cached data in seconds (Default: 300)
+
+        Returns list of all services as a DataFrame
+        """
+        cache_name = f'services_tags_{'_'.join(str(tag) for tag in tags)}'
+        services = self.cache_get(cache_name, None, max_age=cache_max_age)
+
+        if services is None or use_cache is False:
+            tags_services = pd.DataFrame()
+            for tag in tags:
+                tag_services = self.get_services_by_tag(tag=tag, use_cache=use_cache, cache_max_age=cache_max_age)
+
+                if tag_services is not None:
+                    tags_services = pd.concat([tags_services, tag_services], ignore_index=True)
+
+            if len(tags_services):
+                services = tags_services
+                self.cache_store(cache_name, services)
 
         return services
 
