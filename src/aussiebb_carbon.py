@@ -372,17 +372,29 @@ class Carbon:
 
         return services
 
-    def get_service(self, service_id, use_cache=True):
+    def get_service(self, service_id, use_cache=True, cache_max_age=300):
         """
         Get customer service detail
 
         service_id: Carbon API service id
         use_cache: Use pre-fetched data if available (Default: True)
+        cache_max_age: Maximum age of cached data in seconds (Default: 300)
 
         Returns service detail as a dict
         """
-        services = self.get_all_services(use_cache)
-        return services.loc[(services.id == service_id)].to_dict(orient='records')[0]
+        cache_name = f'service_{service_id}'
+        service = self.cache_get(cache_name, None, max_age=cache_max_age)
+
+        if service is None or use_cache is False:
+            request = self.make_get_request(f'carbon/services/{service_id}')
+
+            if request.status_code == 200:
+                service = request.json()
+
+            else:
+                raise LookupError(f'Service ID {service_id} could not be found.')
+
+        return service
 
     def get_service_by_avc(self, avc_id, use_cache=True):
         """
