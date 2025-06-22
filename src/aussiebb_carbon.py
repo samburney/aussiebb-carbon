@@ -46,8 +46,16 @@ class Carbon:
         if cache_location is not None:
             self.config['cache_location'] = Path(cache_location).resolve()
         else:
-            script_location = Path(__file__).resolve().parent
-            self.config['cache_location'] = script_location
+            script_root = Path(__file__).resolve().parents[1]
+            cache_path = Path(script_root, 'carbon_cache')
+
+            # Check cache directory exists
+            if cache_path.exists() is False:
+                cache_path.mkdir()
+            elif cache_path.exists() is True and cache_path.is_dir() is False:
+                raise RuntimeError(f'{cache_path} already exists and is not a directory.')
+
+            self.config['cache_location'] = cache_path
 
         self.debug = debug
 
@@ -85,7 +93,8 @@ class Carbon:
 
         Returns value
         """
-        cache_filepath = Path(self.config['cache_location'], 'aussiebb_carbon.cache')
+        cache_filename = f'carbon_{key}.cache'
+        cache_filepath = Path(self.config['cache_location'], cache_filename)
 
         # If cache file already exists, get existing cached data
         if cache_filepath.is_file() and cache_filepath.stat().st_size > 0:
@@ -120,7 +129,8 @@ class Carbon:
         Returns stored value or default value
         """
         value = None
-        cache_filepath = Path(self.config['cache_location'], 'aussiebb_carbon.cache')
+        cache_filename = f'carbon_{key}.cache'
+        cache_filepath = Path(self.config['cache_location'], cache_filename)
         cache_data = {}
 
         # If cache file already exists, get existing cached data
@@ -128,7 +138,10 @@ class Carbon:
             with cache_filepath.open('rb') as cache_file:
                 cache_data = pickle.load(cache_file)
 
-                if key in cache_data and 'login_expiry' in cache_data and time() < cache_data['login_expiry']['value']:
+                if key != 'login_expiry':
+                    login_expiry = self.cache_get('login_expiry', 0)
+
+                if key in cache_data and (key == 'login_expiry' or time() < login_expiry):
                     # Check age of stored data does not exceed max_age
                     if max_age is None or cache_data[key]['time'] + max_age > time():
                         if self.debug is True:
@@ -390,6 +403,7 @@ class Carbon:
 
             if request.status_code == 200:
                 service = request.json()
+                self.cache_store(cache_name, service)
 
             else:
                 raise LookupError(f'Service ID {service_id} could not be found.')
